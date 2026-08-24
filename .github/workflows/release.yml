@@ -21,6 +21,8 @@ jobs:
             target: x86_64-apple-darwin
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -38,17 +40,26 @@ jobs:
       - name: Build release binary
         run: cargo build --release --bin dl --package dl --target ${{ matrix.target }}
 
-      - name: Package binary
+      - name: Package Unix binary
+        if: runner.os != 'Windows'
         run: |
           cd target/${{ matrix.target }}/release
           tar -czf ../../../dl-${{ matrix.target }}.tar.gz dl
           cd ../../..
 
+      - name: Package Windows binary
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          Compress-Archive -Path "target/${{ matrix.target }}/release/dl.exe" -DestinationPath "dl-${{ matrix.target }}.zip"
+
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: dl-${{ matrix.target }}
-          path: dl-${{ matrix.target }}.tar.gz
+          path: |
+            dl-${{ matrix.target }}.tar.gz
+            dl-${{ matrix.target }}.zip
           retention-days: 1
 
   publish:
@@ -75,6 +86,7 @@ jobs:
           mv artifacts/dl-aarch64-apple-darwin/dl-aarch64-apple-darwin.tar.gz release-assets/dl-$TAG_NAME-aarch64-apple-darwin.tar.gz
           mv artifacts/dl-x86_64-apple-darwin/dl-x86_64-apple-darwin.tar.gz release-assets/dl-$TAG_NAME-x86_64-apple-darwin.tar.gz
           mv artifacts/dl-x86_64-unknown-linux-gnu/dl-x86_64-unknown-linux-gnu.tar.gz release-assets/dl-$TAG_NAME-x86_64-unknown-linux-gnu.tar.gz
+          mv artifacts/dl-x86_64-pc-windows-msvc/dl-x86_64-pc-windows-msvc.zip release-assets/dl-$TAG_NAME-x86_64-pc-windows-msvc.zip
           
           # Compute SHA256 hashes for use in the Homebrew formula
           echo "SHA_ARM64_MAC=$(sha256sum release-assets/dl-$TAG_NAME-aarch64-apple-darwin.tar.gz | cut -d' ' -f1)" >> $GITHUB_ENV

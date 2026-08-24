@@ -10,7 +10,7 @@ use std::{
 
 use futures_util::StreamExt;
 use reqwest::{
-    header::{ACCEPT_RANGES, CONTENT_LENGTH, CONTENT_RANGE, ETAG, LAST_MODIFIED, RANGE},
+    header::{HeaderMap, HeaderName, HeaderValue, ACCEPT_RANGES, CONTENT_LENGTH, CONTENT_RANGE, ETAG, LAST_MODIFIED, RANGE},
     Client, Response, StatusCode,
 };
 use tokio::{
@@ -33,6 +33,27 @@ use crate::{
 /// the number of write syscalls low on fast (gigabit) links without using much memory
 /// per worker.
 const WRITE_BUFFER_CAPACITY: usize = 1024 * 1024;
+
+#[derive(Debug)]
+struct RateLimiter {
+    rate: u64,
+    next: Mutex<Instant>,
+}
+
+impl RateLimiter {
+    fn new(rate: u64) -> Self { Self { rate: rate.max(1), next: Mutex::new(Instant::now()) } }
+
+    async fn wait_for(&self, bytes: usize) {
+        let duration = Duration::from_secs_f64(bytes as f64 / self.rate as f64);
+        let mut next = self.next.lock().await;
+        let now = Instant::now();
+        let start = (*next).max(now);
+        *next = start + duration;
+        let wait = start.saturating_duration_since(now);
+        drop(next);
+        if !wait.is_zero() { tokio::time::sleep(wait).await; }
+    }
+}
 
 #[derive(Debug, Clone)]
 struct HttpProbe {
@@ -94,7 +115,7 @@ impl DynamicScaler {
                     let increase = 2.min(self.max_workers - self.current_worker_count);
                     if increase > 0 {
                         tracing::info!(
-                            "Dynamic worker scaling: Initial speed {:.2} MiB/s with {} workers. Increasing to {}.",
+                            "动态调整工作线程：初始速度 {:.2} MiB/s，当前 {} 个工作线程，增加至 {}",
                             current_speed / (1024.0 * 1024.0),
                             self.current_worker_count,
                             self.current_worker_count + increase
@@ -111,7 +132,7 @@ impl DynamicScaler {
                     let improvement = (current_speed - prev_speed) / prev_speed;
                     if improvement >= 0.08 {
                         tracing::info!(
-                            "Dynamic worker scaling: Speed improved by {:.1}% ({:.2} MiB/s -> {:.2} MiB/s) with {} workers.",
+                            "动态调整工作线程：速度提升 {:.1}%（{:.2} MiB/s -> {:.2} MiB/s），当前 {} 个工作线程",
                             improvement * 100.0,
                             prev_speed / (1024.0 * 1024.0),
                             current_speed / (1024.0 * 1024.0),
@@ -123,7 +144,7 @@ impl DynamicScaler {
                         if self.current_worker_count < self.max_workers {
                             let increase = 2.min(self.max_workers - self.current_worker_count);
                             if increase > 0 {
-                                tracing::info!("Scaling up worker count to {}.", self.current_worker_count + increase);
+                                tracing::info!("将工作线程增加至 {}", self.current_worker_count + increase);
                                 let start_id = self.next_worker_id;
                                 self.next_worker_id += increase;
                                 self.current_worker_count += increase;
@@ -133,7 +154,7 @@ impl DynamicScaler {
                     } else {
                         self.consecutive_no_improvement += 1;
                         tracing::info!(
-                            "Dynamic worker scaling: Speed change was {:.1}% ({:.2} MiB/s -> {:.2} MiB/s) with {} workers.",
+                            "动态调整工作线程：速度变化 {:.1}%（{:.2} MiB/s -> {:.2} MiB/s），当前 {} 个工作线程",
                             improvement * 100.0,
                             prev_speed / (1024.0 * 1024.0),
                             current_speed / (1024.0 * 1024.0),
@@ -143,13 +164,13 @@ impl DynamicScaler {
                         if self.consecutive_no_improvement == 1 {
                             let decrease = 2.min(self.current_worker_count.saturating_sub(self.min_workers));
                             if decrease > 0 {
-                                tracing::info!("Scaling back down to {} workers to prevent congestion.", self.current_worker_count - decrease);
+                                tracing::info!("为避免拥塞，将工作线程减少至 {}", self.current_worker_count - decrease);
                                 self.current_worker_count -= decrease;
                                 self.last_speed = None;
                                 return Some(ScalerAction::ScaleDown { count: decrease });
                             }
                         } else {
-                            tracing::info!("Dynamic worker scaling: Speed stabilized with {} workers.", self.current_worker_count);
+                            tracing::info!("动态调整工作线程：速度已稳定，当前 {} 个工作线程", self.current_worker_count);
                         }
                     }
                 } else {
@@ -182,6 +203,7 @@ struct WorkerContext {
     etag: Option<String>,
     last_modified: Option<String>,
     extra_workers_to_stop: Arc<AtomicUsize>,
+    rate_limiter: Option<Arc<RateLimiter>>,
 }
 
 pub async fn download_http(
@@ -193,14 +215,24 @@ pub async fn download_http(
     let (target_path, download_path) = crate::types::determine_download_paths(output.as_ref(), options.overwrite);
     let mut options = options.normalized();
 
-    let client = Client::builder()
+    let mut default_headers = HeaderMap::new();
+    for (name, value) in &options.headers {
+        let name = HeaderName::from_bytes(name.as_bytes()).map_err(|e| DlError::InvalidHeader(e.to_string()))?;
+        let value = HeaderValue::from_str(value).map_err(|e| DlError::InvalidHeader(e.to_string()))?;
+        default_headers.insert(name, value);
+    }
+    let mut client_builder = Client::builder()
         .user_agent(options.user_agent.clone())
+        .default_headers(default_headers)
         .pool_max_idle_per_host(options.connections.unwrap_or(32))
         .connect_timeout(Duration::from_secs(10))
         .read_timeout(Duration::from_secs(30))
         .tcp_nodelay(true)
-        .http2_adaptive_window(true)
-        .build()?;
+        .http2_adaptive_window(true);
+    if let Some(proxy) = &options.proxy {
+        client_builder = client_builder.proxy(reqwest::Proxy::all(proxy).map_err(|e| DlError::InvalidHeader(format!("代理地址无效：{e}")))?);
+    }
+    let client = client_builder.build()?;
 
     emit_progress(
         &options.progress,
@@ -227,7 +259,7 @@ pub async fn download_http(
                     && crate::types::weak_validator_matches(state.last_modified.as_deref(), probe.last_modified.as_deref())
                 {
                     options.chunk_size = state.chunk_size;
-                    tracing::info!(chunk_size = options.chunk_size, "Adopting chunk size from existing download state");
+                    tracing::info!(chunk_size = options.chunk_size, "采用现有下载状态中的分块大小");
                 }
             }
         }
@@ -246,7 +278,7 @@ pub async fn download_http(
                         // continue as single-stream to avoid truncating existing progress.
                         if let Ok(None) = read_inline_state(&download_path).await {
                             use_parallel = false;
-                            tracing::info!("Found single-stream download in progress; continuing with single-stream");
+                            tracing::info!("发现正在进行的单连接下载，将继续使用单连接模式");
                         }
                     }
                 }
@@ -262,12 +294,12 @@ pub async fn download_http(
                     total_size,
                     connections = ?options.connections,
                     chunk_size = options.chunk_size,
-                    "Dynamically scaled chunk size for parallel download"
+                    "已为并行下载动态调整分块大小"
                 );
             }
         }
 
-        tracing::debug!("Starting parallel download");
+        tracing::debug!("开始并行下载");
         match download_parallel(url.clone(), download_path.clone(), options.clone(), client.clone(), probe.clone()).await {
             Ok(mut summary) => {
                 fs::rename(&download_path, &target_path).await?;
@@ -276,9 +308,9 @@ pub async fn download_http(
             }
             Err(error) => {
                 if is_error_retryable(&error) {
-                    tracing::warn!(error = %error, "Parallel download failed with retryable error; falling back to single stream");
+                    tracing::warn!(error = %error, "并行下载遇到可重试错误，将回退到单连接模式");
                     if matches!(error, DlError::RateLimited { .. }) {
-                        tracing::warn!("Waiting 3 seconds after rate limiting before single stream fallback...");
+                        tracing::warn!("触发限速，等待 3 秒后回退到单连接模式");
                         tokio::time::sleep(Duration::from_secs(3)).await;
                     }
                 } else {
@@ -305,7 +337,7 @@ pub async fn download_http(
                     probe.last_modified.as_deref(),
                 ) {
                     start_offset = contiguous_completed_bytes(&state.completed_chunks, total, options.chunk_size);
-                    tracing::info!(start_offset, "Resuming single-stream download from parallel inline state");
+                    tracing::info!(start_offset, "根据并行下载内嵌状态恢复单连接下载");
                 }
             }
         }
@@ -316,7 +348,7 @@ pub async fn download_http(
                 if let Some(total) = total_size {
                     if file_len < total {
                         start_offset = file_len;
-                        tracing::info!(start_offset, "Resuming single-stream download from existing file length");
+                        tracing::info!(start_offset, "根据现有文件长度恢复单连接下载");
                     }
                 }
             }
@@ -345,7 +377,7 @@ async fn download_parallel(
 ) -> Result<DownloadSummary> {
     let total_size = probe
         .total_size
-        .ok_or_else(|| DlError::InvalidResponse("missing content length".to_string()))?;
+        .ok_or_else(|| DlError::InvalidResponse("缺少 Content-Length 响应头".to_string()))?;
     let total_chunks = chunk_count(total_size, options.chunk_size);
 
     let existing_state = if options.resume {
@@ -454,6 +486,7 @@ async fn download_parallel(
         etag: probe.etag,
         last_modified: probe.last_modified,
         extra_workers_to_stop: extra_workers_to_stop.clone(),
+        rate_limiter: options.rate_limit.map(|r| Arc::new(RateLimiter::new(r))),
     };
 
     let mut workers = JoinSet::new();
@@ -512,7 +545,7 @@ async fn download_parallel(
                 }
             }
             _ = tokio::signal::ctrl_c() => {
-                tracing::info!("Ctrl+C detected, shutting down workers and flushing state...");
+                tracing::info!("检测到 Ctrl+C，正在停止工作线程并保存状态");
                 ctrl_c_hit = true;
                 workers.abort_all();
                 break;
@@ -524,7 +557,7 @@ async fn download_parallel(
         let _ = persist_worker_state(&context, true).await;
         return Err(std::io::Error::new(
             std::io::ErrorKind::Interrupted,
-            "Download interrupted by user (Ctrl+C)"
+            "用户中断了下载（Ctrl+C）"
         ).into());
     }
 
@@ -580,7 +613,7 @@ async fn run_worker(worker_id: usize, context: WorkerContext) -> Result<()> {
                 }
             });
             if res.is_ok() {
-                tracing::info!(worker_id, "Shutting down worker as requested by dynamic adjustment");
+                tracing::info!(worker_id, "根据动态调整请求停止工作线程");
                 return Ok(());
             }
         }
@@ -671,7 +704,7 @@ async fn download_segment(
                     attempt,
                     delay_ms = delay.as_millis(),
                     error = %error,
-                    "retrying failed segment after delay"
+                    "分段失败，将在延迟后重试"
                 );
                 tokio::time::sleep(delay).await;
             }
@@ -733,10 +766,11 @@ async fn stream_response_to_file(
 
     while let Some(chunk) = stream.next().await {
         let chunk = chunk?;
+        if let Some(limiter) = &context.rate_limiter { limiter.wait_for(chunk.len()).await; }
         written += chunk.len() as u64;
         if written > segment.len() {
             return Err(DlError::InvalidResponse(format!(
-                "segment {} exceeded expected length {}",
+                "分段 {} 超出预期长度 {}",
                 segment.index,
                 segment.len()
             )));
@@ -769,7 +803,7 @@ async fn stream_response_to_file(
 
     if written != segment.len() {
         return Err(DlError::InvalidResponse(format!(
-            "segment {} wrote {written} bytes, expected {}",
+            "分段 {} 写入 {written} 字节，预期为 {}",
             segment.index,
             segment.len()
         )));
@@ -882,7 +916,7 @@ async fn download_single_stream(
                             attempt,
                             delay_ms = delay.as_millis(),
                             error = %error,
-                            "GET request failed, retrying after delay"
+                            "GET 请求失败，将在延迟后重试"
                         );
                         tokio::time::sleep(delay).await;
                     } else {
@@ -900,7 +934,7 @@ async fn download_single_stream(
                         attempt,
                         delay_ms = delay.as_millis(),
                         error = %error,
-                        "GET request connection failed, retrying after delay"
+                        "GET 请求连接失败，将在延迟后重试"
                     );
                     tokio::time::sleep(delay).await;
                 } else {
@@ -936,6 +970,7 @@ async fn download_single_stream(
         response.content_length().map(|len| len + actual_start_offset)
     });
     let mut stream = response.bytes_stream();
+    let rate_limiter = options.rate_limit.map(|r| Arc::new(RateLimiter::new(r)));
     let mut last_emitted_time = Instant::now();
     let mut chunk_counter = 0_u32;
 
@@ -947,6 +982,7 @@ async fn download_single_stream(
                     break;
                 };
                 let chunk = chunk?;
+                if let Some(limiter) = &rate_limiter { limiter.wait_for(chunk.len()).await; }
                 file.write_all(&chunk).await?;
                 downloaded += chunk.len() as u64;
 
@@ -970,7 +1006,7 @@ async fn download_single_stream(
                 }
             }
             _ = tokio::signal::ctrl_c() => {
-                tracing::info!("Ctrl+C detected, flushing file and shutting down...");
+                tracing::info!("检测到 Ctrl+C，正在保存文件并退出");
                 ctrl_c_hit = true;
                 break;
             }
@@ -983,7 +1019,7 @@ async fn download_single_stream(
     if ctrl_c_hit {
         return Err(std::io::Error::new(
             std::io::ErrorKind::Interrupted,
-            "Download interrupted by user (Ctrl+C)"
+            "用户中断了下载（Ctrl+C）"
         ).into());
     }
 
@@ -1036,7 +1072,7 @@ async fn probe_server(client: &Client, url: &str) -> Result<HttpProbe> {
     } else {
         tracing::debug!(
             status = %range_response.status(),
-            "range probe failed; trying metadata fallbacks"
+            "范围探测失败，尝试使用元数据回退方案"
         );
     }
 
@@ -1078,18 +1114,18 @@ async fn describe_status(response: Response, context: &str) -> String {
     let mitigation = header_string(response.headers().get("cf-mitigated"));
     let body = response.text().await.ok();
 
-    let mut message = format!("{context} returned {status}");
+    let mut message = format!("{context} 返回了 {status}");
 
     if let Some(server) = server {
-        message.push_str(&format!(" (server: {server})"));
+        message.push_str(&format!("（服务器：{server}）"));
     }
 
     if let Some(mitigation) = mitigation {
-        message.push_str(&format!("; Cloudflare mitigation: {mitigation}"));
+        message.push_str(&format!("；Cloudflare 防护：{mitigation}"));
     }
 
     if let Some(body_error) = body.as_deref().and_then(extract_response_error) {
-        message.push_str(&format!("; response error: {body_error}"));
+        message.push_str(&format!("；响应错误：{body_error}"));
     }
 
     message

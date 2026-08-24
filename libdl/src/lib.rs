@@ -11,7 +11,7 @@ pub use http::download_http;
 pub use torrent::{download_torrent, list_torrent_files, TorrentInput, TorrentOptions};
 pub use types::{
     DownloadKind, DownloadOptions, DownloadPhase, DownloadProgress, DownloadSummary,
-    InlineDownloadState, ProgressReceiver, ProgressSender, Segment,
+    DisplayLanguage, InlineDownloadState, ProgressReceiver, ProgressSender, Segment,
 };
 
 #[derive(Debug, Clone)]

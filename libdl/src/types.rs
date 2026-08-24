@@ -10,6 +10,12 @@ pub const DEFAULT_CONNECTIONS: usize = 8;
 pub const DEFAULT_CHUNK_SIZE: u64 = 2 * 1024 * 1024;
 pub const DEFAULT_METADATA_FLUSH_INTERVAL: Duration = Duration::from_secs(5);
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DisplayLanguage {
+    Zh,
+    En,
+}
+
 pub type ProgressSender = mpsc::UnboundedSender<DownloadProgress>;
 pub type ProgressReceiver = mpsc::UnboundedReceiver<DownloadProgress>;
 
@@ -23,6 +29,13 @@ pub struct DownloadOptions {
     pub metadata_flush_interval: Duration,
     pub progress: Option<ProgressSender>,
     pub only_files: Option<Vec<usize>>,
+    /// Maximum aggregate HTTP download rate in bytes per second.
+    pub rate_limit: Option<u64>,
+    /// Additional HTTP headers applied to every request.
+    pub headers: Vec<(String, String)>,
+    /// Optional HTTP proxy URL.
+    pub proxy: Option<String>,
+    pub language: DisplayLanguage,
 }
 
 impl Default for DownloadOptions {
@@ -36,6 +49,10 @@ impl Default for DownloadOptions {
             metadata_flush_interval: DEFAULT_METADATA_FLUSH_INTERVAL,
             progress: None,
             only_files: None,
+            rate_limit: None,
+            headers: Vec::new(),
+            proxy: None,
+            language: DisplayLanguage::En,
         }
     }
 }

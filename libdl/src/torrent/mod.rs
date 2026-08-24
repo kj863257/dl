@@ -91,7 +91,7 @@ pub async fn download_torrent(
             AddTorrentResponse::Added(_, torrent)
             | AddTorrentResponse::AlreadyManaged(_, torrent) => Ok(torrent),
             AddTorrentResponse::ListOnly(_) => Err(DlError::Torrent(
-                "torrent was added in list-only mode unexpectedly".to_string(),
+                "种子意外以仅列出模式添加".to_string(),
             )),
         }
     }
@@ -104,7 +104,7 @@ pub async fn download_torrent(
     _options: TorrentOptions,
 ) -> Result<DownloadSummary> {
     Err(DlError::Torrent(
-        "libdl was built without the `torrent` feature".to_string(),
+        "libdl 构建时未启用 `torrent` 功能".to_string(),
     ))
 }
 
@@ -158,7 +158,7 @@ pub async fn list_torrent_files(
             }
             Ok(files)
         }
-        _ => Err(DlError::Torrent("expected list-only response".to_string())),
+        _ => Err(DlError::Torrent("期望得到仅列出响应".to_string())),
     }
 }
 
@@ -168,7 +168,7 @@ pub async fn list_torrent_files(
     _output_dir: impl AsRef<Path>,
 ) -> Result<Vec<(usize, String, u64)>> {
     Err(DlError::Torrent(
-        "libdl was built without the `torrent` feature".to_string(),
+        "libdl 构建时未启用 `torrent` 功能".to_string(),
     ))
 }
 

@@ -2,37 +2,40 @@ use std::io;
 
 #[derive(Debug, thiserror::Error)]
 pub enum DlError {
-    #[error("I/O error: {0}")]
+    #[error("输入输出错误：{0}")]
     Io(#[from] io::Error),
 
-    #[error("HTTP error: {0}")]
+    #[error("HTTP 错误：{0}")]
     Http(#[from] reqwest::Error),
 
-    #[error("invalid HTTP response: {0}")]
+    #[error("请求头无效：{0}")]
+    InvalidHeader(String),
+
+    #[error("无效的 HTTP 响应：{0}")]
     InvalidResponse(String),
 
-    #[error("rate limited: {message}")]
+    #[error("请求被限速：{message}")]
     RateLimited {
         message: String,
         retry_after: Option<std::time::Duration>,
     },
 
-    #[error("server error: {0}")]
+    #[error("服务器错误：{0}")]
     ServerError(String),
 
-    #[error("server does not support resumable range downloads")]
+    #[error("服务器不支持可恢复的分段下载")]
     RangesUnsupported,
 
-    #[error("download state is invalid: {0}")]
+    #[error("下载状态无效：{0}")]
     InvalidState(String),
 
-    #[error("serialization error: {0}")]
+    #[error("序列化错误：{0}")]
     Serialization(#[from] serde_json::Error),
 
-    #[error("torrent error: {0}")]
+    #[error("种子错误：{0}")]
     Torrent(String),
 
-    #[error("worker task failed: {0}")]
+    #[error("工作线程任务失败：{0}")]
     Join(#[from] tokio::task::JoinError),
 }
 

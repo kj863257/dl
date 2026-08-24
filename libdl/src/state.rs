@@ -49,7 +49,7 @@ pub async fn read_inline_state(path: impl AsRef<Path>) -> Result<Option<InlineDo
         || state_len + METADATA_FOOTER_SIZE > file_len
     {
         return Err(DlError::InvalidState(format!(
-            "inline metadata length {state_len} is not valid for file length {file_len}"
+            "内嵌元数据长度 {state_len} 与文件长度 {file_len} 不匹配"
         )));
     }
 
@@ -72,7 +72,7 @@ pub async fn write_inline_state(
     let state_len = state_bytes.len() as u64;
     if state_len > MAX_METADATA_SIZE {
         return Err(DlError::InvalidState(format!(
-            "inline metadata exceeds maximum size: {state_len} bytes"
+            "内嵌元数据超过最大大小：{state_len} 字节"
         )));
     }
 

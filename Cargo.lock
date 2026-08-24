@@ -561,12 +561,15 @@ dependencies = [
 name = "dl"
 version = "0.1.0"
 dependencies = [
+ "base64",
  "clap",
  "dialoguer",
  "indicatif",
  "libdl",
+ "serde_json",
  "tokio",
  "url",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]

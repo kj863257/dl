@@ -17,3 +17,6 @@ indicatif.workspace = true
 libdl = { path = "../libdl" }
 tokio.workspace = true
 url.workspace = true
+serde_json.workspace = true
+base64.workspace = true
+windows-sys.workspace = true
